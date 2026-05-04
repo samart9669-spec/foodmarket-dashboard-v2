@@ -87,7 +87,10 @@ if st.button("🚀 สแกนและตรวจสอบข้อมูล"
                 for d in ai_results:
                     branch = BRANCH_CONFIG.get(d.get('vid'), "ไม่ทราบสาขา")
                     line = str(d.get('line_no'))
-                    match = master_data.get(branch, {}).get(line)
+                    branch_items = master_data.get(branch, {})
+                    match = branch_items.get(line)
+                    if not match and d.get('code'):
+                        match = next((item for item in branch_items.values() if item.get('code') == d['code']), None)
                     
                     if d.get('qty', 0) > 0:
                         is_valid = match and match['code'] == d['code'] and match['price'] == d['unit_price']
