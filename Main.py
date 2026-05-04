@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import math
 import google.generativeai as genai
 from PIL import Image
 import gspread
@@ -25,11 +26,20 @@ CSV_CONFIG = {
 
 # --- 🛠️ 2. ระบบเชื่อมต่อ Google Sheets ---
 @st.cache_resource
-def get_google_sheet():
+def get_gspread_client():
     creds_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT"])
     creds = Credentials.from_service_account_info(creds_info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    # ⚠️ สั่งให้วิ่งไปหาแท็บที่ชื่อ "Data" ตรงๆ
-    return gspread.authorize(creds).open_by_key(st.secrets["SHEET_ID"]).worksheet("Data")
+    return gspread.authorize(creds)
+
+def get_google_sheet():
+    return get_gspread_client().open_by_key(st.secrets["SHEET_ID"]).worksheet("Data")
+
+def clean_for_sheets(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return ""
+    return value
 
 # --- 🧠 3. สมองกล AI ---
 def analyze_receipts(images, model_version):
@@ -158,7 +168,7 @@ if st.button("🚀 สแกนและตรวจสอบข้อมูล"
                         "รหัสสินค้า": item_code,
                         "ชื่อเมนู": item_name,
                         "ราคา": unit_price,
-                        "จำนวน": qty,
+                        "จำนวน": int(qty),
                         "ยอด (฿)": amount,
                         "ตรวจสอบ": "✅ ผ่าน (CSV)"
                     })
@@ -175,20 +185,21 @@ if st.button("🚀 สแกนและตรวจสอบข้อมูล"
 # --- 📋 5. ยืนยันข้อมูลก่อนลง Sheet ---
 if 'preview_data' in st.session_state and st.session_state['preview_data']:
     df_preview = pd.DataFrame(st.session_state['preview_data'])
-    st.data_editor(df_preview, use_container_width=True)
-    
+    df_edited = st.data_editor(df_preview, use_container_width=True)
+
     if st.button("✅ ยืนยันและบันทึกลง Google Sheets", type="primary", use_container_width=True):
         try:
             sheet = get_google_sheet()
-            data_to_save = df_preview.drop(columns=['ตรวจสอบ']).values.tolist()
-            
-            # 💡 เพิ่มคอลัมน์ว่าง 2 ช่องต่อท้าย (สำหรับ 📅 วันที่_Excel และ 🏪 สาขา_TH)
-            for row in data_to_save:
-                row.extend(["", ""]) 
-                
-            # 💡 ใส่ USER_ENTERED เพื่อให้ Google Sheets มองเป็นตัวเลขจริงๆ ไม่ใช่แค่ตัวหนังสือ
+            raw_rows = df_edited.drop(columns=['ตรวจสอบ']).values.tolist()
+
+            data_to_save = []
+            for row in raw_rows:
+                cleaned = [clean_for_sheets(v) for v in row]
+                cleaned.extend(["", ""])
+                data_to_save.append(cleaned)
+
             sheet.append_rows(data_to_save, value_input_option="USER_ENTERED")
-            
+
             st.success("🎉 บันทึกข้อมูลสำเร็จ! ยอดขายวิ่งเข้าชีตเรียบร้อย")
             st.balloons()
             st.session_state['preview_data'] = []
