@@ -201,6 +201,21 @@ if 'preview_data' in st.session_state and st.session_state['preview_data']:
     df_preview = pd.DataFrame(st.session_state['preview_data'])
     df_edited = st.data_editor(df_preview, use_container_width=True)
 
+    # สรุปยอดขายแต่ละสาขา (แสดงเพื่อตรวจสอบ ไม่ส่งขึ้น Sheet)
+    st.subheader("📊 สรุปยอดขายตามสาขา")
+    df_summary = (
+        df_edited
+        .groupby("สาขา (จาก CSV)", as_index=False)
+        .agg(จำนวนรายการ=("ชื่อเมนู", "count"), ยอดรวม_บาท=("ยอด (฿)", "sum"))
+        .rename(columns={"สาขา (จาก CSV)": "สาขา", "ยอดรวม_บาท": "ยอดรวม (฿)"})
+        .sort_values("สาขา")
+    )
+    df_summary["ยอดรวม (฿)"] = df_summary["ยอดรวม (฿)"].map("{:,.2f}".format)
+    total_all = df_edited["ยอด (฿)"].sum()
+    st.dataframe(df_summary, use_container_width=True, hide_index=True)
+    st.metric("ยอดรวมทั้งหมด", f"฿{total_all:,.2f}")
+    st.divider()
+
     if st.button("✅ ยืนยันและบันทึกลง Google Sheets", type="primary", use_container_width=True):
         try:
             sheet = get_google_sheet()
