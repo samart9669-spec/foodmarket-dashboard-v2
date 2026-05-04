@@ -48,8 +48,18 @@ def analyze_receipts(images, model_version):
     model = genai.GenerativeModel(api_model_name)
     prompt = f"""
     Find VID number in the receipt header. Valid VIDs: {list(BRANCH_CONFIG.keys())}
-    Extract for each item line: Line_Number (number before item name), Item_Code, Qty, and Unit_Price.
-    Return ONLY JSON list: [{{"vid": "str", "line_no": "str", "code": "str", "qty": int, "unit_price": float}}]
+    Extract for each item line where Total_Amount > 0.
+
+    The receipt lines ALWAYS follow this exact structure in 2 rows:
+    Row 1: [Line Number]. [Item Name]
+    Row 2: [Item Code]   [Unit Price]   [Quantity]   [Total Amount]
+
+    Example:
+    2. ข้าวมันไก่ทอด
+    FMFC033-002  60  33 1,980.00
+    → code: "FMFC033-002", unit_price: 60.0, qty: 33, total_amount: 1980.0
+
+    Return ONLY JSON list: [{{"vid": "str", "code": "str", "unit_price": float, "qty": int, "total_amount": float}}]
     """
     for attempt in range(3):
         try:
@@ -91,7 +101,7 @@ csv_file = st.file_uploader("หรืออัปโหลดไฟล์ CSV (
 
 if st.button("🚀 สแกนและตรวจสอบข้อมูล", type="primary", use_container_width=True):
     temp_data = []
-    
+  
     # 📝 ประมวลผลรูปภาพ
     if files:
         with st.spinner(f"กำลังสแกนด้วยโหมด {ai_choice}..."):
@@ -101,29 +111,57 @@ if st.button("🚀 สแกนและตรวจสอบข้อมูล"
                 
                 for d in ai_results:
                     branch = BRANCH_CONFIG.get(d.get('vid'), "ไม่ทราบสาขา")
-                    line = str(d.get('line_no'))
-                    branch_items = master_data.get(branch, {})
-                    match = branch_items.get(line)
-                    if not match and d.get('code'):
-                        match = next((item for item in branch_items.values() if item.get('code') == d['code']), None)
+                    extracted_code = str(d.get('code', '')).strip()
+                    ai_unit_price = float(d.get('unit_price', 0))
+                    ai_qty = int(d.get('qty', 0))
+                    ai_total = float(d.get('total_amount', 0))
                     
-                    if d.get('qty', 0) > 0:
-                        price = match['price'] if match else float(d.get('unit_price', 0))
-                        qty = int(d.get('qty', 0))
-                        is_valid = match is not None
-                        temp_data.append({
-                            "วันที่": formatted_date_for_sheet,
-                            "สาขา (จาก CSV)": branch,
-                            "รหัสสินค้า": d.get('code', ''),
-                            "ชื่อเมนู": match['name'] if match else "⚠️ รหัสไม่ตรง",
-                            "ราคา": price,
-                            "จำนวน": qty,
-                            "ยอด (฿)": float(price * qty),
-                            "ตรวจสอบ": "✅ ผ่าน" if is_valid else "❌ ขัดข้อง"
-                        })
+                    if ai_total > 0:
+                        branch_items = master_data.get(branch, {})
+                        # 💡 หาเมนูจาก "รหัสสินค้า" ที่ AI อ่านได้
+                        match = next((item for item in branch_items.values() if item.get('code') == extracted_code), None)
+                        
+                        if match:
+                            db_price = float(match['price'])
+                            
+                            # 💡 ลอจิกตรวจสอบความถูกต้อง: จำนวน x ราคา = ยอดรวม หรือไม่?
+                            # ถ้า AI อ่านมาเป๊ะ (ราคาตรง Database และคูณกันได้ยอดรวมพอดี)
+                            if (ai_unit_price == db_price) and (ai_qty * ai_unit_price == ai_total):
+                                final_qty = ai_qty
+                                final_total = ai_total
+                                status = "✅ ผ่าน"
+                            else:
+                                # ⚠️ ถ้าไม่ตรง ให้เชื่อ "ยอดรวม (Total)" เป็นหลัก แล้วหารด้วยราคา Database
+                                final_qty = round(ai_total / db_price) if db_price > 0 else 0
+                                final_total = ai_total
+                                status = "⚠️ ปรับยอดจาก Total"
+                            
+                            if final_qty > 0:
+                                temp_data.append({
+                                    "วันที่": formatted_date_for_sheet,
+                                    "สาขา (จาก CSV)": branch,
+                                    "รหัสสินค้า": match['code'],
+                                    "ชื่อเมนู": match['name'],
+                                    "ราคา": db_price,
+                                    "จำนวน": int(final_qty),
+                                    "ยอด (฿)": final_total,
+                                    "ตรวจสอบ": status
+                                })
+                        else:
+                            # กรณีไม่พบรหัสสินค้านี้ในระบบ Database
+                            temp_data.append({
+                                "วันที่": formatted_date_for_sheet,
+                                "สาขา (จาก CSV)": branch,
+                                "รหัสสินค้า": extracted_code,
+                                "ชื่อเมนู": "⚠️ รหัสไม่ตรง Database",
+                                "ราคา": ai_unit_price,
+                                "จำนวน": ai_qty,
+                                "ยอด (฿)": ai_total,
+                                "ตรวจสอบ": "❌ ขัดข้อง"
+                            })
             except Exception as e:
                 st.error(f"เกิดข้อผิดพลาดในการสแกนภาพ: {e}")
-
+                    
     # 📝 ประมวลผล CSV
     if csv_file:
         try:
