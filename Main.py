@@ -72,8 +72,8 @@ st.subheader("📅 1. ตั้งค่าการทำงาน")
 col1, col2 = st.columns(2)
 with col1:
     selected_date = st.date_input("ระบุวันที่ของยอดขาย:", datetime.date.today())
-    # ⚠️ ปรับ format วันที่ขาออกให้ Google sheets เอาไปคำนวณง่ายที่สุด
-    formatted_date_for_sheet = selected_date.strftime("%Y-%m-%d") 
+    be_year = selected_date.year + 543
+    formatted_date_for_sheet = selected_date.strftime(f"%d/%m/{be_year}")
 with col2:
     ai_choice = st.radio("🤖 เลือกขุมพลัง AI:", ["Flash (เน้นแม่นยำ)", "Flash Lite (เน้นความเร็ว)"])
 
