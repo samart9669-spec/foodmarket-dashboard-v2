@@ -2,8 +2,9 @@ import streamlit as st
 import pandas as pd
 import json
 import math
+import threading
+import gc
 import google.generativeai as genai
-from PIL import Image
 import gspread
 from google.oauth2.service_account import Credentials
 import datetime
@@ -34,6 +35,11 @@ def get_gspread_client():
 def get_google_sheet():
     return get_gspread_client().open_by_key(st.secrets["SHEET_ID"]).worksheet("Data")
 
+@st.cache_resource
+def get_vision_semaphore():
+    """Shared semaphore (across all sessions) — limits concurrent Gemini Vision API calls to 2."""
+    return threading.Semaphore(2)
+
 def clean_for_sheets(value):
     if value is None:
         return ""
@@ -61,9 +67,11 @@ def analyze_receipts(images, model_version):
 
     Return ONLY JSON list: [{{"vid": "str", "code": "str", "unit_price": float, "qty": int, "total_amount": float}}]
     """
+    sem = get_vision_semaphore()
     for attempt in range(3):
         try:
-            response = model.generate_content([prompt] + images)
+            with sem:
+                response = model.generate_content([prompt] + images)
             text = response.text.strip()
             if not text:
                 raise ValueError("AI returned empty response")
@@ -420,8 +428,14 @@ if st.button("🔍  สแกนและตรวจสอบข้อมูล
     if files:
         with st.spinner(f"กำลังสแกนด้วย {ai_choice} ..."):
             try:
-                imgs = [Image.open(f) for f in files]
-                ai_results = analyze_receipts(imgs, ai_choice)
+                ai_results = []
+                for f in files:
+                    img_bytes = f.read()
+                    img_part = {"mime_type": f.type or "image/jpeg", "data": img_bytes}
+                    results = analyze_receipts([img_part], ai_choice)
+                    ai_results.extend(results)
+                    del img_bytes, img_part
+                    gc.collect()
 
                 for d in ai_results:
                     branch = BRANCH_CONFIG.get(d.get('vid'), "ไม่ทราบสาขา")
