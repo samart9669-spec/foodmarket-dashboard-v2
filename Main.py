@@ -3,8 +3,10 @@ import pandas as pd
 import json
 import math
 import threading
+import time
 import gc
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 import gspread
 from google.oauth2.service_account import Credentials
 import datetime
@@ -40,6 +42,35 @@ def get_vision_semaphore():
     """Shared semaphore (across all sessions) — limits concurrent Gemini Vision API calls to 2."""
     return threading.Semaphore(2)
 
+class TokenBucket:
+    """Shared rate limiter — refills continuously so idle periods let bursts through immediately."""
+    def __init__(self, rate_per_minute):
+        self.rate = rate_per_minute / 60.0
+        self.capacity = rate_per_minute
+        self.tokens = float(rate_per_minute)
+        self.last_refill = time.time()
+        self.lock = threading.Lock()
+
+    def wait_for_token(self):
+        while True:
+            with self.lock:
+                now = time.time()
+                self.tokens = min(self.capacity, self.tokens + (now - self.last_refill) * self.rate)
+                self.last_refill = now
+                if self.tokens >= 1:
+                    self.tokens -= 1
+                    return
+                wait_time = (1 - self.tokens) / self.rate
+            time.sleep(wait_time)
+
+@st.cache_resource
+def get_rate_limiters():
+    """Shared per-model rate limiters (across all sessions) — kept just under each model's real RPM quota."""
+    return {
+        'gemini-2.5-flash': TokenBucket(rate_per_minute=4),        # real limit: 5/min
+        'gemini-2.5-flash-lite': TokenBucket(rate_per_minute=8),   # real limit: 10/min
+    }
+
 def clean_for_sheets(value):
     if value is None:
         return ""
@@ -50,8 +81,8 @@ def clean_for_sheets(value):
 # --- AI ---
 def analyze_receipts(images, model_version):
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    api_model_name = 'gemini-2.5-flash' if model_version == "Flash (เน้นแม่นยำ)" else 'gemini-2.5-flash-lite'
-    model = genai.GenerativeModel(api_model_name)
+    preferred_model = 'gemini-2.5-flash' if model_version == "Flash (เน้นแม่นยำ)" else 'gemini-2.5-flash-lite'
+    fallback_model = 'gemini-2.5-flash-lite' if preferred_model == 'gemini-2.5-flash' else 'gemini-2.5-flash'
     prompt = f"""
     Find VID number in the receipt header. Valid VIDs: {list(BRANCH_CONFIG.keys())}
     Extract for each item line where Total_Amount > 0.
@@ -68,18 +99,29 @@ def analyze_receipts(images, model_version):
     Return ONLY JSON list: [{{"vid": "str", "code": "str", "unit_price": float, "qty": int, "total_amount": float}}]
     """
     sem = get_vision_semaphore()
-    for attempt in range(3):
-        try:
-            with sem:
-                response = model.generate_content([prompt] + images)
-            text = response.text.strip()
-            if not text:
-                raise ValueError("AI returned empty response")
-            return json.loads(text.replace("```json", "").replace("```", "").strip())
-        except (ValueError, json.JSONDecodeError) as e:
-            if attempt == 2:
-                raise ValueError(f"AI ไม่สามารถอ่านสลิปได้ ({e}) — ลองใช้โหมดอื่นหรืออัปโหลดรูปใหม่")
-            import time; time.sleep(2)
+    limiters = get_rate_limiters()
+    last_error = None
+
+    for api_model_name in (preferred_model, fallback_model):
+        model = genai.GenerativeModel(api_model_name)
+        for attempt in range(2):
+            try:
+                limiters[api_model_name].wait_for_token()
+                with sem:
+                    response = model.generate_content([prompt] + images)
+                text = response.text.strip()
+                if not text:
+                    raise ValueError("AI returned empty response")
+                return json.loads(text.replace("```json", "").replace("```", "").strip())
+            except ResourceExhausted as e:
+                last_error = e
+                break  # quota full on this model — skip straight to the fallback model
+            except (ValueError, json.JSONDecodeError) as e:
+                last_error = e
+                if attempt == 0:
+                    time.sleep(2)
+
+    raise ValueError(f"AI ไม่สามารถอ่านสลิปได้ ({last_error}) — ลองใหม่อีกครั้งในอีกสักครู่")
 
 # ============================================================
 # PAGE CONFIG & STYLES

@@ -1,6 +1,6 @@
 streamlit
 pandas
 google-generativeai
-Pillow
+google-api-core
 gspread
 google-auth
